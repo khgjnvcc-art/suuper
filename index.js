@@ -1,353 +1,575 @@
-const { Telegraf, Markup } = require('telegraf');
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-const UserAgent = require('user-agents');
-const fs = require('fs');
-const express = require('express');
+import asyncio
+import logging
+import os
+import re
+import json
+import time
+import csv
+import io
+import math
+from datetime import datetime
+from io import BytesIO
+import aiohttp
+import asyncpg
+import redis.asyncio as redis
+import matplotlib
 
-puppeteer.use(StealthPlugin());
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
-// --- الإعدادات الأساسية ---
-const BOT_TOKEN = process.env.BOT_TOKEN || '8690835074:AAGcbDTPCqP5ixRVf9LC73EX4NGNnf_6_S4';
-const MY_TELEGRAM_ID = parseInt(process.env.MY_TELEGRAM_ID) || 8435344041; 
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramAPIError
+from aiohttp import web
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.redis import RedisStorage
 
-const bot = new Telegraf(BOT_TOKEN);
-const userState = {};
+# ==========================================
+# ⚙️ الإعدادات (تُجلب من متغيرات البيئة في الاستضافة)
+# ==========================================
+TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+LOG_CHANNEL_ID = os.getenv("LOG_CHANNEL_ID")
+PG_DSN = os.getenv("DATABASE_URL")
+REDIS_URL = os.getenv("REDIS_URL")
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST")
+WEBHOOK_PATH = f"/webhook/{TOKEN}"
+WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+WEBAPP_HOST = "0.0.0.0"
+WEBAPP_PORT = int(os.getenv("PORT", 8080))
 
-// --- خادم الويب لاستضافة Render ---
-const app = express();
-app.get('/', (req, res) => res.send('🟢 لوحة تحكم VIP تعمل بنجاح! السيرفر نشط.'));
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🌐 الخادم الوهمي يعمل على المنفذ ${PORT}`));
-
-// --- الواجهات الجذابة (اللوحة الرئيسية) ---
-const mainMenu = Markup.keyboard([
-    ['🚀 إرسال طلب دعم جديد', '📊 حالة السيرفر'],
-    ['▶️ بدء البوت', '❌ إلغاء العملية']
-]).resize();
-
-// --- قائمة الدول العربية والعالمية ---
-const countries = [
-    { name: '🇾🇪 اليمن (+967)', code: '967' }, { name: '🇸🇦 السعودية (+966)', code: '966' },
-    { name: '🇪🇬 مصر (+20)', code: '20' }, { name: '🇦🇪 الإمارات (+971)', code: '971' },
-    { name: '🇯🇴 الأردن (+962)', code: '962' }, { name: '🇰🇼 الكويت (+965)', code: '965' },
-    { name: '🇴🇲 عُمان (+968)', code: '968' }, { name: '🇶🇦 قطر (+974)', code: '974' },
-    { name: '🇧🇭 البحرين (+973)', code: '973' }, { name: '🇮🇶 العراق (+964)', code: '964' },
-    { name: '🇸🇾 سوريا (+963)', code: '963' }, { name: '🇱🇧 لبنان (+961)', code: '961' },
-    { name: '🇵🇸 فلسطين (+970)', code: '970' }, { name: '🇩🇿 الجزائر (+213)', code: '213' },
-    { name: '🇲🇦 المغرب (+212)', code: '212' }, { name: '🇹🇳 تونس (+216)', code: '216' },
-    { name: '🇱🇾 ليبيا (+218)', code: '218' }, { name: '🇸🇩 السودان (+249)', code: '249' },
-    { name: '🇺🇸 أمريكا (+1)', code: '1' }, { name: '🇬🇧 بريطانيا (+44)', code: '44' },
-    { name: '🇹🇷 تركيا (+90)', code: '90' }, { name: '🇩🇪 ألمانيا (+49)', code: '49' }
-];
-
-// وظيفة لإنشاء لوحة مفاتيح الدول مع صفحات (Pagination)
-function getCountryKeyboard(pageIndex) {
-    const itemsPerPage = 8; // عدد الدول في كل صفحة
-    const start = pageIndex * itemsPerPage;
-    const end = start + itemsPerPage;
-    const pageItems = countries.slice(start, end);
-
-    const buttons = [];
-    for (let i = 0; i < pageItems.length; i += 2) {
-        const row = [];
-        row.push(Markup.button.callback(pageItems[i].name, `set_cc_${pageItems[i].code}`));
-        if (i + 1 < pageItems.length) {
-            row.push(Markup.button.callback(pageItems[i+1].name, `set_cc_${pageItems[i+1].code}`));
-        }
-        buttons.push(row);
-    }
-
-    const navRow = [];
-    if (start > 0) navRow.push(Markup.button.callback('⬅️ السابق', `page_${pageIndex - 1}`));
-    if (end < countries.length) navRow.push(Markup.button.callback('التالي ➡️', `page_${pageIndex + 1}`));
-    if (navRow.length > 0) buttons.push(navRow);
-
-    buttons.push([Markup.button.callback('🌐 إدخال الرمز يدوياً', 'set_code_manual')]);
-    buttons.push([Markup.button.callback('🚫 إلغاء', 'cancel_task')]);
-
-    return Markup.inlineKeyboard(buttons);
-}
-
-// --- وظائف مساعدة ---
-const randomDelay = (min = 40, max = 90) => Math.floor(Math.random() * (max - min + 1) + min);
-const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-
-let globalBrowser;
-
-async function getBrowser() {
-    if (globalBrowser && globalBrowser.connected) return globalBrowser;
-    console.log("🔄 جاري تهيئة محرك المتصفح...");
-    try {
-        globalBrowser = await puppeteer.launch({
-            headless: true,
-            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--no-first-run', '--no-zygote', '--single-process', '--disable-extensions']
-        });
-        console.log("✅ المتصفح الاحترافي جاهز للعمل.");
-        return globalBrowser;
-    } catch (e) {
-        console.error("❌ خطأ:", e); throw e;
+# تم التحديث بناءً على طلبك ليكون ALISMS و GrizzlySMS
+SITES = {
+    "alisms": {
+        "name": "سيرفر ALISMS 🟢",
+        "url": "https://alisms.org/stubs/handler_api.php",
+        "key": os.getenv("API_KEY_ALISMS")
+    },
+    "grizzly": {
+        "name": "سيرفر Grizzly 🐻",
+        "url": "https://api.grizzlysms.com/stubs/handler_api.php",
+        "key": os.getenv("API_KEY_GRIZZLY")
     }
 }
 
-bot.use(async (ctx, next) => {
-    if (ctx.from && ctx.from.id === MY_TELEGRAM_ID) {
-        try { await next(); } catch (err) { console.error("Error:", err); }
-    }
-});
-
-// بدء البوت وزر التحديث
-bot.start(startBotHandler);
-bot.hears('▶️ بدء البوت', startBotHandler);
-
-async function startBotHandler(ctx) {
-    delete userState[ctx.from.id];
-    await ctx.replyWithHTML(`<b>مرحباً بك سيدي في لوحة التحكم VIP 👑</b>\n\n<i>تم تحديث النظام وحل مشكلة اللغات والدول بنجاح.</i>`, mainMenu);
+# ==========================================
+# 🌟 مميزات المواقع (تُعرض عند اختيار السيرفر)
+# ==========================================
+SITE_FEATURES = {
+    "alisms": """
+🟢 *مميزات سيرفر ALISMS:*
+✅ *أسعار تنافسية:* يوفر أرقاماً بأسعار اقتصادية جداً.
+✅ *تغطية ممتازة:* يدعم معظم الدول العربية والأجنبية بقوة.
+✅ *سرعة الوصول:* وصول أكواد التفعيل (SMS) بسرعة فائقة.
+✅ *تحديث مستمر:* إضافة أرقام جديدة يومياً لخدمات مثل واتساب وتليجرام.
+✅ *استقرار عالي:* خوادم مستقرة ونسبة نجاح مرتفعة في التفعيلات.
+""",
+    "grizzly": """
+🐻 *مميزات سيرفر Grizzly SMS:*
+✅ *مخزون ضخم:* الملايين من الأرقام المتاحة لمختلف الخدمات العالمية.
+✅ *تغطية شاملة:* يدعم أكثر من 170 دولة حول العالم.
+✅ *تنوع الخدمات:* يوفر أرقاماً لخدمات نادرة وتطبيقات غير شائعة.
+✅ *جودة متميزة:* أرقام حصرية ونسبة الحظر فيها شبه معدومة.
+✅ *نظام تعويض ذكي:* استرداد الرصيد تلقائياً وبسرعة إذا لم يصل الكود.
+"""
 }
 
-bot.hears('📊 حالة السيرفر', async (ctx) => {
-    const isConnected = globalBrowser && globalBrowser.connected;
-    const status = isConnected ? "🟢 متصل (Render Online)" : "🔴 المحرك في وضع الاستعداد";
-    await ctx.replyWithHTML(`<b>📊 حالة النظام:</b>\nالمتصفح: ${status}\nالخادم: 🟢 متصل`);
-});
+# ==========================================
+# 📊 القواميس الأساسية
+# ==========================================
+POPULAR_COUNTRIES = {
+    "مصر 🇪🇬": "21", "السعودية 🇸🇦": "53", "العراق 🇮🇶": "47", "الامارات 🇦🇪": "95", "الكويت 🇰🇼": "52",
+    "عمان 🇴🇲": "110", "اليمن 🇾🇪": "30", "امريكا 🇺🇸": "187", "كندا 🇨🇦": "36", "المغرب 🇲🇦": "37", 
+    "الجزائر 🇩🇿": "58", "تركيا 🇹🇷": "62", "روسيا 🇷🇺": "0", "ألمانيا 🇩🇪": "43", "فرنسا 🇫🇷": "78", 
+    "بريطانيا 🇬🇧": "16"
+}
 
-bot.hears('❌ إلغاء العملية', async (ctx) => {
-    delete userState[ctx.from.id];
-    await ctx.reply('✅ تم تنظيف الجلسة والعودة للقائمة الرئيسية.', mainMenu);
-});
+ALL_COUNTRIES = {
+    "روسيا 🇷🇺": "0", "أوكرانيا 🇺🇦": "1", "كازاخستان 🇰🇿": "2", "الصين 🇨🇳": "3", "الفلبين 🇵🇭": "4",
+    "ميانمار 🇲🇲": "5", "إندونيسيا 🇮🇩": "6", "ماليزيا 🇲🇾": "7", "كينيا 🇰🇪": "8", "تنزانيا 🇹🇿": "9",
+    "فيتنام 🇻🇳": "10", "قيرغيزستان 🇰🇬": "11", "امريكا 🇺🇸": "187", "إسرائيل 🇮🇱": "13", "مصر 🇪🇬": "21",
+    "اليمن 🇾🇪": "30", "كندا 🇨🇦": "36", "المغرب 🇲🇦": "37", "ألمانيا 🇩🇪": "43", "العراق 🇮🇶": "47",
+    "الكويت 🇰🇼": "52", "السعودية 🇸🇦": "53", "الجزائر 🇩🇿": "58", "تركيا 🇹🇷": "62", "فرنسا 🇫🇷": "78",
+    "الامارات 🇦🇪": "95", "عمان 🇴🇲": "110", "سوريا 🇸🇾": "118", "لبنان 🇱🇧": "135", "فلسطين 🇵🇸": "143",
+    "قطر 🇶🇦": "144", "البحرين 🇧🇭": "145"
+}
 
-bot.hears('🚀 إرسال طلب دعم جديد', async (ctx) => {
-    userState[ctx.from.id] = { step: 'select_country' };
-    await ctx.replyWithHTML('<b>🌍 الخطوة 1:</b> اختر الدولة المستهدفة:', getCountryKeyboard(0));
-});
+POPULAR_SERVICES = {
+    "wa": "واتساب", "tg": "تليجرام", "ig": "انستقرام", "go": "جوجل", "fb": "فيسبوك", "lf": "تيك توك",
+    "tw": "تويتر (X)", "sn": "سناب شات", "ha": "حراج"
+}
 
-bot.action(/page_(\d+)/, async (ctx) => {
-    const pageIndex = parseInt(ctx.match[1]);
-    await ctx.editMessageReplyMarkup(getCountryKeyboard(pageIndex).reply_markup);
-    await ctx.answerCbQuery();
-});
+ALL_SERVICES_MAP = {
+    "wa": "واتساب", "tg": "تليجرام", "ig": "انستقرام", "go": "جوجل", "fb": "فيسبوك", "lf": "تيك توك",
+    "vi": "فايبر", "tw": "تويتر", "ub": "اوبر", "sn": "سناب شات", "ds": "ديسكورد", "am": "امازون",
+    "mm": "مايكروسوفت", "kf": "وي شات", "nf": "نتفليكس", "vk": "فكونتاكتي", "ok": "اودنوكلاسنيكي",
+    "ha": "حراج", "nn": "نون"
+}
 
-bot.action(/set_cc_(.+)/, async (ctx) => {
-    const code = ctx.match[1];
-    const state = userState[ctx.from.id];
-    if (!state) return ctx.answerCbQuery('⚠️ الجلسة منتهية.', { show_alert: true });
+class SearchState(StatesGroup):
+    waiting_for_country = State()
+    waiting_for_service_global = State()
+    waiting_for_service_in_country = State()
+    waiting_for_country_for_service = State()
 
-    state.countryCode = code;
-    state.step = 'get_phone';
-    await ctx.editMessageText(`✅ تم اختيار الرمز (+${code})\n\n<b>الآن أرسل رقم الهاتف فقط (بدون الرمز):</b>\nمثال: <code>771596288</code>`, { parse_mode: 'HTML' });
-    await ctx.answerCbQuery();
-});
+# ==========================================
+# 🛠️ نظام التنبيهات والأخطاء (Logging)
+# ==========================================
+class TelegramAlertHandler(logging.Handler):
+    def __init__(self, bot_instance: Bot, admin_id: int, log_channel_id: str = None):
+        super().__init__()
+        self.bot = bot_instance
+        self.admin_id = admin_id
+        self.log_channel_id = log_channel_id
+        self.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 
-bot.action('set_code_manual', async (ctx) => {
-    const state = userState[ctx.from.id];
-    if (!state) return;
-    state.step = 'get_cc';
-    await ctx.editMessageText('📝 أرسل رمز الدولة فقط (مثال: 967 بدون علامة +):');
-    await ctx.answerCbQuery();
-});
+    def emit(self, record):
+        if record.levelno >= logging.ERROR:
+            msg = self.format(record)
+            if len(msg) > 3000:
+                msg = msg[:2900] + "\n... (الرسالة طويلة جداً، تم اختصارها)"
+            error_message_to_send = f"⚠️ *خطأ حرج في النظام:*\n`{msg}`"
+            
+            async def safe_send(chat_id):
+                try:
+                    await self.bot.send_message(chat_id, error_message_to_send)
+                except Exception:
+                    pass
+            try:
+                loop = asyncio.get_running_loop()
+                if self.admin_id: loop.create_task(safe_send(self.admin_id))
+                if self.log_channel_id: loop.create_task(safe_send(self.log_channel_id))
+            except RuntimeError:
+                pass
 
-bot.on('text', async (ctx) => {
-    const state = userState[ctx.from.id];
-    if (!state) return;
-    const text = ctx.message.text.trim();
+bot_session = AiohttpSession()
+bot = Bot(token=TOKEN, session=bot_session, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
 
-    if (['🚀 إرسال طلب دعم جديد', '📊 حالة السيرفر', '❌ إلغاء العملية', '▶️ بدء البوت'].includes(text)) return;
+telegram_handler = TelegramAlertHandler(bot, ADMIN_ID, LOG_CHANNEL_ID)
+telegram_handler.setLevel(logging.ERROR)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", handlers=[
+    logging.StreamHandler(),
+    telegram_handler 
+])
 
-    if (state.step === 'get_cc') {
-        state.countryCode = text.replace('+', '');
-        state.step = 'get_phone';
-        await ctx.replyWithHTML(`<b>✅ تم الحفظ (+${state.countryCode}).\n\nالآن أرسل رقم الهاتف فقط (بدون الرمز):</b>`);
-    }
-    else if (state.step === 'get_phone') {
-        state.nationalNumber = text.replace(/[^0-9]/g, '');
-        state.fullPhone = `+${state.countryCode}${state.nationalNumber}`;
-        state.step = 'get_email';
-        await ctx.replyWithHTML('<b>📧 الخطوة 2:</b> أرسل البريد الإلكتروني:');
-    } 
-    else if (state.step === 'get_email') {
-        if (!isValidEmail(text)) return ctx.reply('⚠️ إيميل غير صحيح، حاول مجدداً:');
-        state.email = text;
-        state.step = 'get_message';
-        await ctx.replyWithHTML('<b>📝 الخطوة 3:</b> أرسل نص الرسالة لواتساب:');
-    }
-    else if (state.step === 'get_message') {
-        state.customMessage = text;
-        state.step = 'confirm';
+# ==========================================
+# 🔄 إعداد الـ Redis Storage مع حماية الاتصال
+# ==========================================
+redis_client = redis.from_url(
+    REDIS_URL, 
+    decode_responses=True, 
+    health_check_interval=10,
+    socket_keepalive=True,
+    retry_on_timeout=True
+)
+redis_storage = RedisStorage(redis=redis_client)
+dp = Dispatcher(storage=redis_storage)
+router = Router()
+dp.include_router(router)
+
+db_pool = None
+PRICES_CACHE = {"alisms": {"time": 0, "data": {}}, "grizzly": {"time": 0, "data": {}}}
+
+# ==========================================
+# 🛡️ نظام نبضات الحياة (Keep-Alive) لمنع انقطاع السيرفر
+# ==========================================
+async def keep_alive_connections():
+    """مهمة تعمل في الخلفية ترسل نبضة لسيرفر Redis و PostgreSQL لكي لا يتم قطع الاتصال"""
+    while True:
+        try:
+            # إرسال نبضة لـ Redis
+            await redis_client.ping()
+            
+            # إرسال نبضة لـ PostgreSQL
+            if db_pool:
+                async with db_pool.acquire() as conn:
+                    await conn.execute("SELECT 1")
+                    
+        except Exception as e:
+            logging.warning(f"Keep-Alive ping failed (Will auto-reconnect): {e}")
         
-        const summary = `<b>👑 مراجعة الطلب النهائي (VIP)</b>\n\n` +
-                        `🌍 <b>رمز الدولة:</b> <code>+${state.countryCode}</code>\n` +
-                        `📱 <b>الرقم المحلي:</b> <code>${state.nationalNumber}</code>\n` +
-                        `📧 <b>الإيميل:</b> <code>${state.email}</code>\n\n` +
-                        `<b>هل تريد التنفيذ الآن؟</b>`;
-        
-        await ctx.replyWithHTML(summary, Markup.inlineKeyboard([
-            [Markup.button.callback('🚀 نعم، أرسل الآن', 'start_task')],
-            [Markup.button.callback('❌ إلغاء', 'cancel_task')]
-        ]));
-    }
-});
+        # الانتظار 60 ثانية قبل النبضة القادمة (ريندر يقطع الاتصال بعد 300 ثانية خمول)
+        await asyncio.sleep(60)
 
-bot.action('cancel_task', async (ctx) => {
-    delete userState[ctx.from.id];
-    await ctx.editMessageText('❌ تم إلغاء العملية بنجاح.');
-    await ctx.answerCbQuery();
-});
+# ==========================================
+# 🗄️ تهيئة قواعد البيانات
+# ==========================================
+async def init_db():
+    global db_pool
+    try:
+        db_pool = await asyncpg.create_pool(PG_DSN, command_timeout=10)
+        async with db_pool.acquire() as conn:
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS history (
+                    id SERIAL PRIMARY KEY, user_id BIGINT, phone TEXT,
+                    service TEXT, code TEXT, price NUMERIC, date TIMESTAMP, operator TEXT, server TEXT
+                );
+                CREATE TABLE IF NOT EXISTS operator_scores (
+                    operator TEXT, server TEXT, success_count INT DEFAULT 0, fail_count INT DEFAULT 0,
+                    PRIMARY KEY (operator, server)
+                );
+                CREATE TABLE IF NOT EXISTS banned_numbers (
+                    phone TEXT PRIMARY KEY, date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            ''')
+        logging.info("تم الاتصال بـ PostgreSQL بنجاح.")
+    except Exception as e:
+        logging.error(f"خطأ في الاتصال بـ PostgreSQL: {e}")
 
-bot.action('start_task', async (ctx) => {
-    const state = userState[ctx.from.id];
-    if (!state) return ctx.answerCbQuery('⚠️ الجلسة منتهية.', { show_alert: true });
+async def get_today_stats(srv_code, site_key):
+    try:
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch("SELECT operator, COUNT(*) as c FROM history WHERE service = $1 AND server = $2 AND DATE(date) = CURRENT_DATE GROUP BY operator", srv_code, site_key)
+            return {r['operator']: r['c'] for r in rows}
+    except Exception as e:
+        logging.error(f"Error fetching stats: {e}")
+        return {}
+
+async def get_user_site(state: FSMContext):
+    data = await state.get_data()
+    return data.get("site", "alisms")
+
+# ==========================================
+# 🌐 الاتصال بالـ API والجلب الديناميكي
+# ==========================================
+async def api_request(site_key, params, max_retries=3):
+    url = SITES[site_key]["url"]
+    params["api_key"] = SITES[site_key]["key"]
+    delay = 0.5
+    async with aiohttp.ClientSession() as session:
+        for attempt in range(max_retries):
+            try:
+                async with session.get(url, params=params, timeout=7) as response:
+                    if response.status == 200:
+                        text = await response.text()
+                        try: return json.loads(text)
+                        except json.JSONDecodeError: return text
+            except Exception: pass
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 5.0) 
+    return None
+
+async def get_all_prices(site_key):
+    now = time.time()
+    if now - PRICES_CACHE[site_key]["time"] < 300 and PRICES_CACHE[site_key]["data"]:
+        return PRICES_CACHE[site_key]["data"]
+    res = await api_request(site_key, {"action": "getPrices"})
+    if isinstance(res, dict):
+        PRICES_CACHE[site_key]["data"] = res
+        PRICES_CACHE[site_key]["time"] = now
+        return res
+    return {}
+
+async def get_balance(site_key):
+    res = await api_request(site_key, {"action": "getBalance"})
+    if res and isinstance(res, str) and ":" in res:
+        try: return float(res.split(':')[1])
+        except: return 0.0
+    return 0.0
+
+# ==========================================
+# 🎛️ واجهة المستخدم والأوامر
+# ==========================================
+def main_kb():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
+        [KeyboardButton(text="🌍 تصفح جميع الدول")],
+        [KeyboardButton(text="🔍 بحث عن دولة"), KeyboardButton(text="🔍 بحث عن خدمة")],
+        [KeyboardButton(text="💰 فحص الرصيد"), KeyboardButton(text="💻 لوحة التحكم")],
+        [KeyboardButton(text="🔄 تغيير السيرفر")],
+        [KeyboardButton(text="📊 الإحصائيات (رسم بياني)"), KeyboardButton(text="📂 استخراج Excel")],
+        [KeyboardButton(text="🇸🇦 طلب مباشر (222)")],
+    ])
+    return kb
+
+@router.message(F.text == "/start")
+async def start_cmd(message: Message, state: FSMContext):
+    await state.clear()
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟢 الشراء من سيرفر ALISMS", callback_data="set_site_alisms")],
+        [InlineKeyboardButton(text="🐻 الشراء من سيرفر Grizzly SMS", callback_data="set_site_grizzly")]
+    ])
+    text = "💎 *مرحباً بك في نظام الصياد VIP V8.0 المزدوج*\nالبوت الآن يعمل بأقصى سرعة وثبات مع الموقعين.\n\n👇 يرجى اختيار السيرفر الذي ترغب بالعمل عليه الآن:"
+    await message.answer(text, reply_markup=markup)
+
+@router.message(F.text == "🔄 تغيير السيرفر")
+async def change_site_btn(message: Message):
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟢 الشراء من سيرفر ALISMS", callback_data="set_site_alisms")],
+        [InlineKeyboardButton(text="🐻 الشراء من سيرفر Grizzly SMS", callback_data="set_site_grizzly")]
+    ])
+    await message.answer("🔄 *اختر السيرفر الجديد:*", reply_markup=markup)
+
+@router.callback_query(F.data.startswith("set_site_"))
+async def change_site_callback(call: CallbackQuery, state: FSMContext):
+    site_key = call.data.replace("set_site_", "")
+    await state.update_data(site=site_key)
     
-    await ctx.editMessageText('🔄 <b>جاري تشغيل المتصفح باللغة الإنجليزية وإرسال الطلب... الرجاء الانتظار⏳</b>', { parse_mode: 'HTML' });
+    try: 
+        await call.message.delete()
+    except: 
+        pass
+
+    features = SITE_FEATURES.get(site_key, "")
+    site_name = SITES[site_key]['name']
     
-    runSupportTask(state.countryCode, state.nationalNumber, state.fullPhone, state.email, state.customMessage, ctx);
-    delete userState[ctx.from.id];
-    await ctx.answerCbQuery();
-});
+    welcome_text = f"✅ *تم تحويل البوت للعمل بنجاح على:* `{site_name}`\n\n{features}\n\n👇 *يمكنك الآن البدء باستخدام البوت من القائمة أدناه:*"
+    
+    await call.message.answer(welcome_text, reply_markup=main_kb())
+    await call.answer("تم تغيير السيرفر بنجاح! 🚀", show_alert=False)
 
-async function runSupportTask(countryCode, nationalNumber, fullPhone, email, customMsg, ctx) {
-    let browser, context, page;
-    try {
-        browser = await getBrowser();
-        context = await browser.createIncognitoBrowserContext();
-        page = await context.newPage();
+@router.message(F.text == "💰 فحص الرصيد")
+async def check_bal(message: Message, state: FSMContext):
+    site_key = await get_user_site(state)
+    bal = await get_balance(site_key)
+    await message.answer(f"💰 رصيدك الحالي في ({SITES[site_key]['name']}): `{bal}$`")
+
+def build_pagination_kb(items, page, per_page, prefix, back_data=None):
+    total_pages = math.ceil(len(items) / per_page)
+    start, end = page * per_page, (page * per_page) + per_page
+    keyboard, row = [], []
+    for text, data in items[start:end]:
+        row.append(InlineKeyboardButton(text=text, callback_data=data))
+        if len(row) == 2: keyboard.append(row); row = []
+    if row: keyboard.append(row)
+    nav_row = []
+    if page > 0: nav_row.append(InlineKeyboardButton(text="⬅️ السابق", callback_data=f"{prefix}_{page-1}"))
+    if page < total_pages - 1: nav_row.append(InlineKeyboardButton(text="التالي ➡️", callback_data=f"{prefix}_{page+1}"))
+    if nav_row: keyboard.append(nav_row)
+    if back_data: keyboard.append([InlineKeyboardButton(text="🔙 رجوع", callback_data=back_data)])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+@router.message(F.text == "🌍 تصفح جميع الدول")
+async def show_all_countries(message: Message, state: FSMContext):
+    await handle_countries_page(message, state, 0)
+
+@router.callback_query(F.data.startswith("pg_c_"))
+async def paginate_countries(call: CallbackQuery, state: FSMContext):
+    await handle_countries_page(call.message, state, int(call.data.split("_")[2]), edit=True)
+
+async def handle_countries_page(message, state, page, edit=False):
+    site_key = await get_user_site(state)
+    data = await get_all_prices(site_key)
+    country_ids = {cid for c_data in data.values() if isinstance(c_data, dict) for cid in c_data.keys()}
+    sorted_cids = sorted(list(country_ids), key=lambda x: (x not in ALL_COUNTRIES.values(), int(x) if x.isdigit() else 0))
+    items = [(next((n for n, c in ALL_COUNTRIES.items() if c == cid), f"دولة {cid} 🌍"), f"country_{cid}") for cid in sorted_cids]
+    markup = build_pagination_kb(items, page, 20, "pg_c")
+    text = f"🌍 *جميع الدول في {SITES[site_key]['name']}*\n(صفحة {page+1}/{max(1, math.ceil(len(items)/20))}):"
+    
+    if edit:
+        await message.edit_text(text, reply_markup=markup)
+    else:
+        await message.answer(text, reply_markup=markup)
+
+# ==========================================
+# 📊 رسم الإحصائيات بأمان (بدون حظر الـ Event Loop)
+# ==========================================
+def draw_chart(ops, counts, site_name):
+    plt.figure(figsize=(8, 5))
+    plt.bar(ops, counts, color='skyblue')
+    plt.title(f"أفضل 5 مشغلين (معدل النجاح) - {site_name}")
+    plt.xlabel("المشغل")
+    plt.ylabel("العدد")
+    plt.xticks(rotation=45, ha='right') 
+    plt.tight_layout() 
+    buf = BytesIO()
+    plt.savefig(buf, format='png')
+    buf.seek(0)
+    plt.close()
+    return buf
+
+@router.message(F.text == "📊 الإحصائيات (رسم بياني)")
+async def generate_chart(message: Message, state: FSMContext):
+    site_key = await get_user_site(state)
+    if message.from_user.id != ADMIN_ID: return await message.answer("⛔ هذا الزر للمدير فقط.")
         
-        // 1. إجبار المتصفح على اللغة الإنجليزية لضمان عدم تعطل التصميم
-        await page.setViewport({ width: 1280, height: 800 });
-        await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
-        const desktopUA = new UserAgent({ deviceCategory: 'desktop' }).toString();
-        await page.setUserAgent(desktopUA);
+    try:
+        async with db_pool.acquire() as conn:
+            records = await conn.fetch("SELECT operator, success_count FROM operator_scores WHERE server = $1 ORDER BY success_count DESC LIMIT 5", site_key)
+    except Exception as e: return await message.answer(f"حدث خطأ: {e}")
+    
+    if not records: return await message.answer(f"لا توجد بيانات كافية للرسم البياني في سيرفر {SITES[site_key]['name']}.")
+         
+    ops = [r['operator'] for r in records]
+    counts = [r['success_count'] for r in records]
+    
+    buf = await asyncio.to_thread(draw_chart, ops, counts, SITES[site_key]['name'])
+    
+    photo = BufferedInputFile(buf.read(), filename="chart.png")
+    await message.answer_photo(photo, caption="📊 *تحليل ذكي لأداء المشغلين*")
+
+@router.message(F.text == "📂 استخراج Excel")
+async def export_excel(message: Message):
+    if message.from_user.id != ADMIN_ID: return await message.answer("⛔ هذا الزر للمدير فقط.")
         
-        // استخدام ?lang=en في الرابط لفتح الصفحة باللغة الإنجليزية إجبارياً
-        await page.goto('https://www.whatsapp.com/contact/noclient/?lang=en', { waitUntil: 'domcontentloaded', timeout: 60000 });
+    try:
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch("SELECT id, user_id, phone, service, code, price, date, operator, server FROM history ORDER BY date DESC")
+    except Exception as e: return await message.answer(f"حدث خطأ: {e}")
+    
+    if not rows: return await message.answer("لا توجد بيانات لاستخراجها.")
         
-        await page.waitForFunction(() => {
-            return Array.from(document.querySelectorAll('input')).filter(
-                i => (i.type === 'text' || i.type === 'tel' || i.type === 'email') && i.offsetHeight > 0
-            ).length >= 3;
-        }, { timeout: 30000 });
+    output = io.StringIO()
+    writer = csv.writer(output, dialect='excel')
+    writer.writerow(['ID', 'User ID', 'Phone', 'Service', 'Code', 'Price', 'Date', 'Operator', 'Server'])
+    for r in rows:
+        writer.writerow([str(r['id']), str(r['user_id']), r['phone'], r['service'], r['code'], str(r['price']), str(r['date']), r['operator'], r.get('server', 'alisms')])
+    
+    file_bytes = output.getvalue().encode('utf-8-sig')
+    file = BufferedInputFile(file_bytes, filename="vip_history.csv") 
+    await message.answer_document(file, caption="📂 سجل العمليات VIP بالكامل.")
 
-        await new Promise(r => setTimeout(r, 2000));
+@router.message(F.text == "🇸🇦 طلب مباشر (222)")
+async def saudi_direct_222(message: Message, state: FSMContext):
+    site_key = await get_user_site(state)
+    try:
+        await message.answer(f"⚡ جاري طلب رقم واتساب من المشغل 222 حصراً عبر السيرفر النشط ({SITES[site_key]['name']})...")
+        ops_dict = {"222": 0.0} 
+        asyncio.create_task(hunt_single_number(message.chat.id, "wa", "53", ops_dict, site_key))
+    except Exception: pass
 
-        const inputs = await page.$$('input');
-        const visibleTextInputs = [];
-        for (const input of inputs) {
-            const type = await input.evaluate(el => el.type);
-            const isVisible = await input.evaluate(el => el.offsetHeight > 0 && el.offsetWidth > 0);
-            if ((type === 'text' || type === 'tel' || type === 'email') && isVisible) {
-                visibleTextInputs.push(input);
-            }
-        }
+# ==========================================
+# 🎯 دوال الصياد الذكي (Hunting logic)
+# ==========================================
+async def hunt_single_number(chat_id, srv, cid, ops_dict, site_key):
+    timestamp = int(time.time())
+    hunt_id = f"hunt:{chat_id}:{timestamp}"
+    ops_list = list(ops_dict.keys())
+    
+    try: await redis_client.setex(hunt_id, 600, "active") 
+    except Exception: return
+    
+    markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛑 إيقاف الصياد", callback_data=f"stophunt_{chat_id}_{timestamp}")]])
+    try:
+        msg = await bot.send_message(chat_id, f"🚀 *الصياد يعمل الآن ({SITES[site_key]['name']})...*\nنبحث لك عن رقم لخدمة `{ALL_SERVICES_MAP.get(srv, srv)}`...", reply_markup=markup)
+    except: return
+    
+    delay = 0.5
+    caught_data = None
+    
+    try:
+        while await redis_client.get(hunt_id):
+            for op in ops_list:
+                params = {"action": "getNumberV2", "service": srv, "country": cid, "operator": op}
+                res = await api_request(site_key, params, max_retries=1)
+                if isinstance(res, dict) and ('number' in res or 'phoneNumber' in res):
+                    caught_data = res
+                    caught_data['op'] = op
+                    caught_data['price'] = float(ops_dict.get(op, 0.0))
+                    await redis_client.delete(hunt_id) 
+                    break
+            if caught_data: break
+            await asyncio.sleep(delay)
+            delay = min(delay * 1.5, 3.0) 
+    except Exception as e: logging.error(f"Error during hunting loop: {e}")
+    
+    if 'msg' in locals():
+        try: await bot.delete_message(chat_id, msg.message_id)
+        except TelegramAPIError: pass 
+    if caught_data:
+        await handle_success_hunt(chat_id, caught_data, srv, cid, site_key)
 
-        if (visibleTextInputs.length < 3) throw new Error("لم أتمكن من إيجاد حقول الإدخال.");
-        const phoneInput = visibleTextInputs[0];
+async def handle_success_hunt(chat_id, data, srv, cid, site_key):
+    act_id = data.get('id') or data.get('activationId')
+    phone = data.get('number') or data.get('phoneNumber')
+    op = data.get('op', 'unknown')
+    price = data.get('price', 0.0)
+    
+    try:
+        await redis_client.hset(f"active_orders:{chat_id}", str(act_id), f"{phone}|{srv}|{op}|{price}|{site_key}")
+        await redis_client.setex(f"session:{act_id}", 1200, "active") 
+    except: pass
+    
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📩 فحص الكود", callback_data=f"check_{act_id}_{phone}")],
+        [InlineKeyboardButton(text="🛡️ إبلاغ 2FA", callback_data=f"ban2fa_{act_id}_{phone}")],
+        [InlineKeyboardButton(text="❌ إلغاء", callback_data=f"canc_{act_id}")]
+    ])
+    
+    try:
+        text = f"🎯 *تم الصيد بنجاح! ({SITES[site_key]['name']})*\n📞 الرقم: `{phone}`\n📡 المشغل: `{op}`\n💰 السعر: `{price}$`\n⏳ ننتظر الكود..."
+        sent_msg = await bot.send_message(chat_id, text, reply_markup=markup)
+        asyncio.create_task(auto_check_sms(chat_id, act_id, phone, srv, op, price, site_key, sent_msg.message_id))
+    except Exception as e: logging.error(f"Error sending success message: {e}")
 
-        // 2. النقر على قائمة الدول وتجنب الشريط الأخضر العلوي
-        await page.evaluate((el) => {
-            const y = el.getBoundingClientRect().top + window.scrollY - 200; // النزول بالصفحة
-            window.scrollTo({top: y, behavior: 'smooth'});
-        }, phoneInput);
-        await new Promise(r => setTimeout(r, 1000));
-
-        // فتح قائمة الدول (النقر المباشر على الزر لتخطي أي حظر)
-        const dropdownOpened = await page.evaluate((el) => {
-            const container = el.closest('div').parentElement.parentElement;
-            const dropdown = container.querySelector('[role="combobox"], [aria-haspopup="listbox"], button');
-            if (dropdown) { dropdown.click(); return true; }
-            return false;
-        }, phoneInput);
-
-        if (dropdownOpened) {
-            // انتظار القائمة للظهور وكتابة الرمز واختياره
-            await new Promise(r => setTimeout(r, 1500));
-            await page.keyboard.type(`+${countryCode}`);
-            await new Promise(r => setTimeout(r, 1000));
-            await page.keyboard.press('ArrowDown'); // النزول للنتيجة الصحيحة
-            await new Promise(r => setTimeout(r, 200));
-            await page.keyboard.press('Enter');     // تأكيد الاختيار
-            await new Promise(r => setTimeout(r, 1000));
-        }
-
-        // 3. تنظيف الخانة وكتابة الرقم الصافي
-        await phoneInput.click();
-        await page.keyboard.down('Control'); await page.keyboard.press('A'); await page.keyboard.up('Control');
-        await page.keyboard.press('Backspace');
-        await phoneInput.type(nationalNumber, { delay: randomDelay() });
+async def auto_check_sms(chat_id, act_id, phone, srv, op, price, site_key, msg_id):
+    start_time = time.time()
+    try:
+        while await redis_client.get(f"session:{act_id}"):
+            if time.time() - start_time > 1100: break 
+                
+            res = await api_request(site_key, {"action": "getStatus", "id": act_id})
+            if isinstance(res, str) and "STATUS_OK" in res:
+                code = "".join(re.findall(r'\d+', res.split(":")[1]))
+                try:
+                    await redis_client.delete(f"session:{act_id}")
+                    await redis_client.hdel(f"active_orders:{chat_id}", str(act_id))
+                except: pass
+                
+                try:
+                    async with db_pool.acquire() as conn:
+                        await conn.execute("INSERT INTO history (user_id, phone, service, code, price, date, operator, server) VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7)", chat_id, phone, srv, code, price, op, site_key)
+                        await conn.execute("INSERT INTO operator_scores (operator, server, success_count) VALUES ($1, $2, 1) ON CONFLICT (operator, server) DO UPDATE SET success_count = operator_scores.success_count + 1", op, site_key)
+                except Exception as db_e: logging.error(f"DB Error: {db_e}")
+                
+                try: await bot.edit_message_text(f"🔔 *الكود وصل!*\n📱 `{phone}`\n✉️ الكود: `{code}`", chat_id=chat_id, message_id=msg_id)
+                except TelegramAPIError: pass 
+                return
+            await asyncio.sleep(10)
+    except: pass
         
-        // 4. كتابة الإيميلات
-        await visibleTextInputs[1].type(email, { delay: randomDelay() });
-        await visibleTextInputs[2].type(email, { delay: randomDelay() });
-        
-        // 5. اختيار نوع الجهاز
-        const androidRadio = await page.$('input[type="radio"][value="android"]') || (await page.$$('input[type="radio"]'))[0];
-        if (androidRadio) await page.evaluate((el) => el.click(), androidRadio);
-        
-        // 6. كتابة الرسالة
-        await page.waitForSelector('textarea', { timeout: 10000 });
-        const textarea = await page.$('textarea');
-        await page.evaluate((el) => {
-            const y = el.getBoundingClientRect().top + window.scrollY - 200;
-            window.scrollTo({top: y, behavior: 'smooth'});
-        }, textarea);
-        await new Promise(r => setTimeout(r, 500));
-        await textarea.type(customMsg, { delay: randomDelay(20, 50) });
-        
-        // 7. النقر على "Next Step"
-        let submitButton = await page.$('button[type="submit"]');
-        if (!submitButton) {
-            const buttons = await page.$$('button');
-            submitButton = buttons[buttons.length - 1]; 
-        }
-        if (submitButton) await page.evaluate((el) => el.click(), submitButton);
-        
-        // 8. انتظار الصفحة التالية ثم النقر على "Send Question"
-        await new Promise(r => setTimeout(r, 6000));
-        await page.evaluate(() => {
-            const buttons = Array.from(document.querySelectorAll('button, div[role="button"]'));
-            const sendBtn = buttons.reverse().find(b => 
-                b.innerText.toLowerCase().includes('send') || 
-                b.innerText.toLowerCase().includes('submit') ||
-                b.innerText.includes('إرسال')
-            );
-            if (sendBtn) sendBtn.click();
-        });
+    try:
+        await api_request(site_key, {"action": "setStatus", "status": "8", "id": act_id})
+        if await redis_client.get(f"session:{act_id}"):
+            await bot.edit_message_text(f"⌛ *انتهى الوقت ولم يصل الكود للرقم:* `{phone}`", chat_id=chat_id, message_id=msg_id)
+    except: pass
 
-        // 9. انتظار صفحة النجاح
-        await new Promise(r => setTimeout(r, 6000));
+@router.callback_query(F.data.startswith("stophunt_"))
+async def stop_hunter(call: CallbackQuery):
+    parts = call.data.split("_")
+    hunt_id = f"hunt:{parts[1]}:{parts[2]}"
+    await redis_client.delete(hunt_id)
+    try: await call.message.edit_text("🛑 *تم إيقاف الصياد بناءً على طلبك.*")
+    except Exception: pass
+    await call.answer("تم إيقاف البحث بنجاح", show_alert=True)
 
-        // 10. إرسال لقطة الشاشة إليك
-        const successScreenshotPath = `success_${Date.now()}.png`;
-        await page.screenshot({ path: successScreenshotPath, fullPage: true });
+# ==========================================
+# 🚀 إعداد الخادم و Webhook
+# ==========================================
+async def on_startup(bot: Bot):
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, TelegramAlertHandler): handler.bot = bot
+    await init_db()
+    
+    # 🔥 تشغيل نظام نبضات الحياة في الخلفية لمنع الاستضافة من فصل قواعد البيانات
+    asyncio.create_task(keep_alive_connections())
+    
+    await bot.set_webhook(WEBHOOK_URL)
+    logging.info(f"Webhook set to {WEBHOOK_URL}")
 
-        await ctx.replyWithPhoto(
-            { source: successScreenshotPath }, 
-            { caption: `✅ <b>تم الإرسال بنجاح سيدي!</b>\n\n📱 الرقم: <code>${fullPhone}</code>\n\n📸 إليك الدليل من داخل واتساب على إتمام العملية.`, parse_mode: 'HTML' }
-        );
+async def on_shutdown(bot: Bot):
+    if db_pool: await db_pool.close()
+    if redis_client: await redis_client.close()
+    logging.info("Bot shutdown complete.")
 
-        if (fs.existsSync(successScreenshotPath)) fs.unlinkSync(successScreenshotPath);
+def main():
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+    app = web.Application()
+    webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
+    webhook_requests_handler.register(app, path=WEBHOOK_PATH)
+    setup_application(app, dp, bot=bot)
+    logging.info(f"Starting server on {WEBAPP_HOST}:{WEBAPP_PORT}")
+    web.run_app(app, host=WEBAPP_HOST, port=WEBAPP_PORT)
 
-    } catch (err) {
-        console.error("Task Error:", err);
-        if (page) {
-            const screenshotPath = `error_${Date.now()}.png`;
-            try {
-                await page.screenshot({ path: screenshotPath, fullPage: true });
-                await ctx.replyWithPhoto({ source: screenshotPath }, { caption: `❌ فشل الإرسال.\nالخطأ: ${err.message}` });
-                if (fs.existsSync(screenshotPath)) fs.unlinkSync(screenshotPath);
-            } catch (e) {
-                await ctx.reply(`❌ فشل الإرسال.\nالخطأ: ${err.message}`);
-            }
-        }
-    } finally {
-        if (page) await page.close().catch(e => console.log(e));
-        if (context) await context.close().catch(e => console.log(e));
-    }
-}
-
-getBrowser().then(() => {
-    bot.launch({ dropPendingUpdates: true });
-    console.log("🤖 بوت التليجرام يعمل الآن.");
-}).catch(err => console.error("❌ فشل تشغيل النظام:", err));
-
-process.once('SIGINT', async () => { if (globalBrowser) await globalBrowser.close(); bot.stop('SIGINT'); });
-process.once('SIGTERM', async () => { if (globalBrowser) await globalBrowser.close(); bot.stop('SIGTERM'); });
+if __name__ == '__main__':
+    required_env_vars = ["BOT_TOKEN", "API_KEY_ALISMS", "API_KEY_GRIZZLY", "ADMIN_ID", "DATABASE_URL", "REDIS_URL", "WEBHOOK_HOST"]
+    for var in required_env_vars:
+        if not os.getenv(var):
+            logging.critical(f"Missing required environment variable: {var}. Exiting.")
+            exit(1)
+    main()
