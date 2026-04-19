@@ -67,14 +67,10 @@ async function getBrowser() {
     }
 }
 
-// حماية البوت (السماح للمدير فقط)
+// حماية البوت
 bot.use(async (ctx, next) => {
     if (ctx.from && ctx.from.id === MY_TELEGRAM_ID) {
-        try {
-            await next();
-        } catch (err) {
-            console.error("❌ حدث خطأ في معالجة الطلب:", err);
-        }
+        try { await next(); } catch (err) { console.error("Error:", err); }
     }
 });
 
@@ -82,7 +78,7 @@ bot.start(async (ctx) => {
     delete userState[ctx.from.id];
     await ctx.replyWithHTML(
         `<b>مرحباً بك سيدي في لوحة التحكم VIP 👑</b>\n\n` +
-        `<i>النظام جاهز ومؤمن بالكامل للعمل على Render.</i>`, 
+        `<i>النظام جاهز للعمل مع التحديث الذكي لرموز الدول.</i>`, 
         mainMenu
     );
 });
@@ -107,16 +103,16 @@ bot.action(/set_code_(.+)/, async (ctx) => {
     const code = ctx.match[1];
     const state = userState[ctx.from.id];
     
-    if (!state) return ctx.answerCbQuery('⚠️ الجلسة منتهية، ابدأ من جديد.', { show_alert: true });
+    if (!state) return ctx.answerCbQuery('⚠️ الجلسة منتهية.', { show_alert: true });
 
     if (code === 'manual') {
         state.countryCode = '';
-        state.step = 'get_phone';
-        await ctx.editMessageText('📝 أرسل الرقم كاملاً مع رمز الدولة (مثال: +967770000000):');
+        state.step = 'get_cc';
+        await ctx.editMessageText('📝 أرسل رمز الدولة فقط (مثال: 967 بدون علامة +):');
     } else {
-        state.countryCode = code;
+        state.countryCode = code.replace('+', ''); // استخراج الرمز فقط
         state.step = 'get_phone';
-        await ctx.editMessageText(`✅ تم اختيار الرمز (${code})\n\n<b>الآن أرسل رقم الهاتف فقط:</b>`, { parse_mode: 'HTML' });
+        await ctx.editMessageText(`✅ تم اختيار الرمز (+${state.countryCode})\n\n<b>الآن أرسل رقم الهاتف فقط (بدون رمز الدولة):</b>\nمثال: <code>771596288</code>`, { parse_mode: 'HTML' });
     }
     await ctx.answerCbQuery();
 });
@@ -124,13 +120,18 @@ bot.action(/set_code_(.+)/, async (ctx) => {
 bot.on('text', async (ctx) => {
     const state = userState[ctx.from.id];
     if (!state) return;
-
     const text = ctx.message.text.trim();
 
     if (['🚀 إرسال طلب دعم جديد', '📊 حالة السيرفر', '❌ إلغاء العملية'].includes(text)) return;
 
-    if (state.step === 'get_phone') {
-        state.phone = state.countryCode ? state.countryCode + text.replace('+', '') : text;
+    if (state.step === 'get_cc') {
+        state.countryCode = text.replace('+', '');
+        state.step = 'get_phone';
+        await ctx.replyWithHTML(`<b>✅ تم الحفظ (+${state.countryCode}).\n\nالآن أرسل رقم الهاتف فقط (بدون رمز الدولة):</b>\nمثال: <code>771596288</code>`);
+    }
+    else if (state.step === 'get_phone') {
+        state.nationalNumber = text.replace(/[^0-9]/g, ''); // استخراج الأرقام فقط
+        state.fullPhone = `+${state.countryCode}${state.nationalNumber}`;
         state.step = 'get_email';
         await ctx.replyWithHTML('<b>📧 الخطوة 2:</b> أرسل البريد الإلكتروني:');
     } 
@@ -145,7 +146,8 @@ bot.on('text', async (ctx) => {
         state.step = 'confirm';
         
         const summary = `<b>👑 مراجعة الطلب النهائي (VIP)</b>\n\n` +
-                        `📱 <b>الرقم:</b> <code>${state.phone}</code>\n` +
+                        `🌍 <b>رمز الدولة:</b> <code>+${state.countryCode}</code>\n` +
+                        `📱 <b>الرقم المحلي:</b> <code>${state.nationalNumber}</code>\n` +
                         `📧 <b>الإيميل:</b> <code>${state.email}</code>\n\n` +
                         `<b>هل تريد التنفيذ الآن؟</b>`;
         
@@ -164,17 +166,16 @@ bot.action('cancel_task', async (ctx) => {
 
 bot.action('start_task', async (ctx) => {
     const state = userState[ctx.from.id];
-    if (!state) return ctx.answerCbQuery('⚠️ الجلسة منتهية، ابدأ من جديد.', { show_alert: true });
+    if (!state) return ctx.answerCbQuery('⚠️ الجلسة منتهية.', { show_alert: true });
     
     await ctx.editMessageText('🔄 <b>جاري تشغيل محرك VIP وإرسال الطلب... الرجاء الانتظار قليلاً⏳</b>', { parse_mode: 'HTML' });
     
-    // تشغيل العملية في الخلفية
-    runSupportTask(state.phone, state.email, state.customMessage, ctx);
+    runSupportTask(state.countryCode, state.nationalNumber, state.fullPhone, state.email, state.customMessage, ctx);
     delete userState[ctx.from.id];
     await ctx.answerCbQuery();
 });
 
-async function runSupportTask(phone, email, customMsg, ctx) {
+async function runSupportTask(countryCode, nationalNumber, fullPhone, email, customMsg, ctx) {
     let browser, context, page;
     try {
         browser = await getBrowser();
@@ -188,13 +189,30 @@ async function runSupportTask(phone, email, customMsg, ctx) {
         
         await page.goto('https://www.whatsapp.com/contact/noclient/', { waitUntil: 'domcontentloaded', timeout: 60000 });
         
-        // 1. تعبئة الحقول
         await page.waitForFunction(() => {
             const textInputs = Array.from(document.querySelectorAll('input')).filter(
                 i => (i.type === 'text' || i.type === 'tel' || i.type === 'email') && i.offsetHeight > 0
             );
             return textInputs.length >= 3;
         }, { timeout: 30000 });
+
+        // 1. تغيير القائمة المنسدلة لرمز الدولة برمجياً
+        await page.evaluate((cc) => {
+            const selects = document.querySelectorAll('select');
+            for (let select of selects) {
+                const options = Array.from(select.options);
+                const option = options.find(opt => opt.value === cc || opt.text.includes(`+${cc}`) || opt.text.includes(`(+${cc})`));
+                if (option) {
+                    select.value = option.value;
+                    select.dispatchEvent(new Event('change', { bubbles: true }));
+                    return true;
+                }
+            }
+            return false;
+        }, countryCode);
+
+        // الانتظار قليلاً ليتم تحديث الصفحة
+        await new Promise(r => setTimeout(r, 1000));
 
         const inputs = await page.$$('input');
         const visibleTextInputs = [];
@@ -207,7 +225,11 @@ async function runSupportTask(phone, email, customMsg, ctx) {
         }
 
         if (visibleTextInputs.length >= 3) {
-            await visibleTextInputs[0].type(phone, { delay: randomDelay() });
+            // مسح الخانة أولاً ثم كتابة الرقم الصافي (بدون رمز الدولة)
+            await visibleTextInputs[0].click({ clickCount: 3 });
+            await page.keyboard.press('Backspace');
+            await visibleTextInputs[0].type(nationalNumber, { delay: randomDelay() });
+            
             await visibleTextInputs[1].type(email, { delay: randomDelay() });
             await visibleTextInputs[2].type(email, { delay: randomDelay() });
         } else {
@@ -221,7 +243,7 @@ async function runSupportTask(phone, email, customMsg, ctx) {
         await page.waitForSelector('textarea', { timeout: 10000 });
         await page.type('textarea', customMsg, { delay: randomDelay(20, 50) });
         
-        // 3. النقر على زر "الخطوة التالية" في الصفحة الأولى
+        // 3. النقر على الزر للمرور للصفحة التالية
         let submitButton = await page.$('button[type="submit"]');
         if (!submitButton) {
             const buttons = await page.$$('button');
@@ -229,25 +251,20 @@ async function runSupportTask(phone, email, customMsg, ctx) {
         }
         if (submitButton) await submitButton.click();
         
-        // --- 🎯 التحديث المهم هنا ---
         // 4. الانتظار حتى تفتح صفحة المقالات (الصفحة الثانية)
         await new Promise(r => setTimeout(r, 6000));
         
         // 5. البحث بذكاء عن زر "إرسال سؤال" والنقر عليه
         await page.evaluate(() => {
             const buttons = Array.from(document.querySelectorAll('button, div[role="button"]'));
-            // البحث عن زر يحتوي على نص الإرسال بمختلف اللغات
-            const sendBtn = buttons.find(b => 
+            // البحث العكسي لضمان جلب الزر الأخير الخاص بالإرسال
+            const sendBtn = buttons.reverse().find(b => 
                 b.innerText.includes('إرسال') || 
                 b.innerText.toLowerCase().includes('send') || 
                 b.innerText.toLowerCase().includes('enviar')
             );
-            
             if (sendBtn) {
                 sendBtn.click();
-            } else if (buttons.length > 0) {
-                // كبديل أخير، النقر على الزر الأخير في الصفحة
-                buttons[buttons.length - 1].click();
             }
         });
 
@@ -261,12 +278,11 @@ async function runSupportTask(phone, email, customMsg, ctx) {
         await ctx.replyWithPhoto(
             { source: successScreenshotPath }, 
             { 
-                caption: `✅ <b>تم الإرسال بنجاح سيدي!</b>\n\n📱 الرقم: <code>${phone}</code>\n\n📸 إليك الدليل من داخل سيرفرات واتساب على إتمام العملية.`, 
+                caption: `✅ <b>تم الإرسال بنجاح سيدي!</b>\n\n📱 الرقم: <code>${fullPhone}</code>\n\n📸 إليك الدليل من داخل سيرفرات واتساب على إتمام العملية.`, 
                 parse_mode: 'HTML' 
             }
         );
 
-        // حذف الصورة من السيرفر لتوفير المساحة
         if (fs.existsSync(successScreenshotPath)) fs.unlinkSync(successScreenshotPath);
 
     } catch (err) {
