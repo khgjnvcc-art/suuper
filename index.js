@@ -183,18 +183,15 @@ async function runSupportTask(phone, email, customMsg, ctx) {
         context = await browser.createIncognitoBrowserContext();
         page = await context.newPage();
         
-        await page.setRequestInterception(true);
-        page.on('request', (req) => {
-            // حظر الموارد غير الضرورية لتسريع التحميل وتخفيف الضغط على Render
-            if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) req.abort();
-            else req.continue();
-        });
+        // 1. تحديد حجم شاشة كمبيوتر قياسي لمنع ظهور الصفحة البيضاء
+        await page.setViewport({ width: 1280, height: 800 });
 
-        // استخدام User-Agent لجهاز كمبيوتر لضمان ظهور الصفحة المطلوبة وليس صفحة الجوال
+        // 2. استخدام User-Agent لجهاز كمبيوتر لضمان ظهور الصفحة المطلوبة وليس صفحة الجوال
         const desktopUA = new UserAgent({ deviceCategory: 'desktop' }).toString();
         await page.setUserAgent(desktopUA);
         
-        await page.goto('https://www.whatsapp.com/contact/noclient/', { waitUntil: 'networkidle2', timeout: 60000 });
+        // 3. استخدام domcontentloaded بدلاً من networkidle2 لتجنب توقف البوت بسبب تأخر تحميل بعض السكربتات
+        await page.goto('https://www.whatsapp.com/contact/noclient/', { waitUntil: 'domcontentloaded', timeout: 60000 });
         
         // التأكد من تحميل حقل رقم الهاتف
         await page.waitForSelector('input[name="phone_number"]', { timeout: 30000 });
@@ -229,7 +226,8 @@ async function runSupportTask(phone, email, customMsg, ctx) {
         if (page) {
             const screenshotPath = `error_${Date.now()}.png`;
             try {
-                await page.screenshot({ path: screenshotPath });
+                // التقاط صفحة كاملة لمعرفة المشكلة بدقة في حال تكرر الخطأ
+                await page.screenshot({ path: screenshotPath, fullPage: true });
                 await ctx.replyWithPhoto({ source: screenshotPath }, { caption: `❌ فشل الإرسال.\nالخطأ: ${err.message}` });
                 if (fs.existsSync(screenshotPath)) fs.unlinkSync(screenshotPath);
             } catch (screenshotErr) {
@@ -246,7 +244,7 @@ async function runSupportTask(phone, email, customMsg, ctx) {
 
 // تشغيل البوت وتهيئة المتصفح
 getBrowser().then(() => {
-    bot.launch({ dropPendingUpdates: true }); // dropPendingUpdates تمنع البوت من تنفيذ الرسائل المتراكمة أثناء الإطفاء
+    bot.launch({ dropPendingUpdates: true }); // تمنع البوت من تنفيذ الرسائل المتراكمة أثناء الإطفاء
     console.log("🤖 بوت التليجرام يعمل الآن.");
 }).catch(err => console.error("❌ فشل تشغيل النظام:", err));
 
