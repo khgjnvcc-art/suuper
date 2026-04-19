@@ -183,40 +183,73 @@ async function runSupportTask(phone, email, customMsg, ctx) {
         context = await browser.createIncognitoBrowserContext();
         page = await context.newPage();
         
-        // 1. تحديد حجم شاشة كمبيوتر قياسي لمنع ظهور الصفحة البيضاء
+        // 1. تحديد حجم شاشة كمبيوتر قياسي
         await page.setViewport({ width: 1280, height: 800 });
 
-        // 2. استخدام User-Agent لجهاز كمبيوتر لضمان ظهور الصفحة المطلوبة وليس صفحة الجوال
+        // 2. فرض اللغة الإنجليزية لتجنب تغير تصميم الصفحة العشوائي (كالبرتغالية التي ظهرت معك)
+        await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8' });
+
+        // 3. استخدام User-Agent ثابت لجهاز كمبيوتر
         const desktopUA = new UserAgent({ deviceCategory: 'desktop' }).toString();
         await page.setUserAgent(desktopUA);
         
-        // 3. استخدام domcontentloaded بدلاً من networkidle2 لتجنب توقف البوت بسبب تأخر تحميل بعض السكربتات
         await page.goto('https://www.whatsapp.com/contact/noclient/', { waitUntil: 'domcontentloaded', timeout: 60000 });
         
-        // التأكد من تحميل حقل رقم الهاتف
-        await page.waitForSelector('input[name="phone_number"]', { timeout: 30000 });
+        // --- 🎯 التحديث الجديد لحل مشكلة عدم العثور على الحقول ---
+        // نحن الآن نبحث عن "حقول الإدخال المرئية" بالترتيب بدلاً من الاسم البرمجي لتفادي تحديثات واتساب
+        await page.waitForFunction(() => {
+            const textInputs = Array.from(document.querySelectorAll('input')).filter(
+                i => (i.type === 'text' || i.type === 'tel' || i.type === 'email') && i.offsetHeight > 0
+            );
+            return textInputs.length >= 3;
+        }, { timeout: 30000 });
+
+        const inputs = await page.$$('input');
+        const visibleTextInputs = [];
+        for (const input of inputs) {
+            const type = await input.evaluate(el => el.type);
+            const isVisible = await input.evaluate(el => el.offsetHeight > 0 && el.offsetWidth > 0);
+            if ((type === 'text' || type === 'tel' || type === 'email') && isVisible) {
+                visibleTextInputs.push(input);
+            }
+        }
+
+        if (visibleTextInputs.length >= 3) {
+            // الحقل الأول هو الهاتف، الثاني الإيميل، الثالث تأكيد الإيميل
+            await visibleTextInputs[0].type(phone, { delay: randomDelay() });
+            await visibleTextInputs[1].type(email, { delay: randomDelay() });
+            await visibleTextInputs[2].type(email, { delay: randomDelay() });
+        } else {
+            throw new Error("تغير تصميم صفحة واتساب ولم أتمكن من إيجاد حقول النص.");
+        }
         
-        await page.type('input[name="phone_number"]', phone, { delay: randomDelay() });
-        await page.type('input[name="email"]', email, { delay: randomDelay() });
-        await page.type('input[name="email_confirm"]', email, { delay: randomDelay() });
+        // تحديد نوع الجهاز (Android) بشكل ذكي
+        const androidRadio = await page.$('input[type="radio"][value="android"]') || (await page.$$('input[type="radio"]'))[0];
+        if (androidRadio) {
+            await androidRadio.click();
+        }
         
-        // تحديد نوع الجهاز (Android)
-        await page.click('input[type="radio"][value="android"]');
+        // كتابة الرسالة في مربع النص (Textarea) الوحيد
+        await page.waitForSelector('textarea', { timeout: 10000 });
+        await page.type('textarea', customMsg, { delay: randomDelay(20, 50) });
         
-        // كتابة الرسالة
-        await page.type('#message', customMsg, { delay: randomDelay(20, 50) });
-        
-        // النقر على زر الخطوة التالية
-        await page.waitForSelector('button[type="submit"]', { timeout: 15000 });
-        await page.click('button[type="submit"]');
+        // النقر على زر الخطوة التالية بشكل ذكي (البحث عن الزر النهائي)
+        let submitButton = await page.$('button[type="submit"]');
+        if (!submitButton) {
+            const buttons = await page.$$('button');
+            submitButton = buttons[buttons.length - 1]; 
+        }
+        if (submitButton) {
+            await submitButton.click();
+        }
         
         // الانتظار قليلاً لتحميل صفحة التأكيد
         await new Promise(r => setTimeout(r, 5000));
         
-        // النقر على زر الإرسال النهائي (إن وُجد)
-        const finalSubmit = await page.$('button[type="submit"]'); // قد يختلف أو يتكرر في الصفحة التالية
+        // النقر على زر الإرسال النهائي في الصفحة التالية (إن وُجد)
+        const finalSubmit = await page.$('button[type="submit"]'); 
         if (finalSubmit) {
-            await page.click('button[type="submit"]');
+            await finalSubmit.click();
             await new Promise(r => setTimeout(r, 3000));
         }
 
@@ -226,7 +259,7 @@ async function runSupportTask(phone, email, customMsg, ctx) {
         if (page) {
             const screenshotPath = `error_${Date.now()}.png`;
             try {
-                // التقاط صفحة كاملة لمعرفة المشكلة بدقة في حال تكرر الخطأ
+                // التقاط صفحة كاملة لمعرفة أي أخطاء إن وجدت
                 await page.screenshot({ path: screenshotPath, fullPage: true });
                 await ctx.replyWithPhoto({ source: screenshotPath }, { caption: `❌ فشل الإرسال.\nالخطأ: ${err.message}` });
                 if (fs.existsSync(screenshotPath)) fs.unlinkSync(screenshotPath);
