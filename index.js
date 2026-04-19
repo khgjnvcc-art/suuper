@@ -103,7 +103,7 @@ bot.hears('▶️ بدء البوت', startBotHandler);
 
 async function startBotHandler(ctx) {
     delete userState[ctx.from.id];
-    await ctx.replyWithHTML(`<b>مرحباً بك سيدي في لوحة التحكم VIP 👑</b>\n\n<i>تم تحديث البوت بإضافة قائمة الدول الذكية.</i>`, mainMenu);
+    await ctx.replyWithHTML(`<b>مرحباً بك سيدي في لوحة التحكم VIP 👑</b>\n\n<i>تم تحديث النظام وحل مشكلة اللغات والدول بنجاح.</i>`, mainMenu);
 }
 
 bot.hears('📊 حالة السيرفر', async (ctx) => {
@@ -198,7 +198,7 @@ bot.action('start_task', async (ctx) => {
     const state = userState[ctx.from.id];
     if (!state) return ctx.answerCbQuery('⚠️ الجلسة منتهية.', { show_alert: true });
     
-    await ctx.editMessageText('🔄 <b>جاري تشغيل المتصفح والدخول لموقع واتساب... الرجاء الانتظار⏳</b>', { parse_mode: 'HTML' });
+    await ctx.editMessageText('🔄 <b>جاري تشغيل المتصفح باللغة الإنجليزية وإرسال الطلب... الرجاء الانتظار⏳</b>', { parse_mode: 'HTML' });
     
     runSupportTask(state.countryCode, state.nationalNumber, state.fullPhone, state.email, state.customMessage, ctx);
     delete userState[ctx.from.id];
@@ -212,12 +212,14 @@ async function runSupportTask(countryCode, nationalNumber, fullPhone, email, cus
         context = await browser.createIncognitoBrowserContext();
         page = await context.newPage();
         
+        // 1. إجبار المتصفح على اللغة الإنجليزية لضمان عدم تعطل التصميم
         await page.setViewport({ width: 1280, height: 800 });
-        await page.setExtraHTTPHeaders({ 'Accept-Language': 'ar,en-US,en;q=0.9' });
+        await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
         const desktopUA = new UserAgent({ deviceCategory: 'desktop' }).toString();
         await page.setUserAgent(desktopUA);
         
-        await page.goto('https://www.whatsapp.com/contact/noclient/', { waitUntil: 'domcontentloaded', timeout: 60000 });
+        // استخدام ?lang=en في الرابط لفتح الصفحة باللغة الإنجليزية إجبارياً
+        await page.goto('https://www.whatsapp.com/contact/noclient/?lang=en', { waitUntil: 'domcontentloaded', timeout: 60000 });
         
         await page.waitForFunction(() => {
             return Array.from(document.querySelectorAll('input')).filter(
@@ -225,33 +227,8 @@ async function runSupportTask(countryCode, nationalNumber, fullPhone, email, cus
             ).length >= 3;
         }, { timeout: 30000 });
 
-        // --- 🎯 التحديث الجديد لحل مشكلة قائمة رمز الدولة (البحث والضغط) ---
-        await page.evaluate(() => {
-            // البحث عن العنصر المسؤول عن فتح قائمة الدول
-            const combobox = document.querySelector('[role="combobox"]');
-            if (combobox) {
-                combobox.click();
-            } else {
-                // كبديل، البحث عن الحقل الأول والنقر على الزر المجاور له
-                const phoneInput = document.querySelector('input[type="text"], input[type="tel"]');
-                if (phoneInput) {
-                    const wrapper = phoneInput.closest('div').parentElement;
-                    const btn = wrapper.querySelector('div[role="button"]') || wrapper.querySelector('button');
-                    if (btn) btn.click();
-                }
-            }
-        });
+        await new Promise(r => setTimeout(r, 2000));
 
-        // انتظار ظهور القائمة
-        await new Promise(r => setTimeout(r, 1000));
-        
-        // كتابة الرمز في مربع البحث الخاص بالقائمة واختياره
-        await page.keyboard.type(`+${countryCode}`);
-        await new Promise(r => setTimeout(r, 1000));
-        await page.keyboard.press('Enter');
-        await new Promise(r => setTimeout(r, 1000));
-
-        // --- 🎯 إدخال الرقم في الخانة ---
         const inputs = await page.$$('input');
         const visibleTextInputs = [];
         for (const input of inputs) {
@@ -262,46 +239,83 @@ async function runSupportTask(countryCode, nationalNumber, fullPhone, email, cus
             }
         }
 
-        if (visibleTextInputs.length >= 3) {
-            // تنظيف خانة الرقم لضمان عدم وجود أرقام سابقة ثم كتابة الرقم
-            await visibleTextInputs[0].click({ clickCount: 3 });
-            await page.keyboard.press('Backspace');
-            await visibleTextInputs[0].type(nationalNumber, { delay: randomDelay() });
-            
-            await visibleTextInputs[1].type(email, { delay: randomDelay() });
-            await visibleTextInputs[2].type(email, { delay: randomDelay() });
-        } else {
-            throw new Error("لم أتمكن من إيجاد حقول الإدخال.");
+        if (visibleTextInputs.length < 3) throw new Error("لم أتمكن من إيجاد حقول الإدخال.");
+        const phoneInput = visibleTextInputs[0];
+
+        // 2. النقر على قائمة الدول وتجنب الشريط الأخضر العلوي
+        await page.evaluate((el) => {
+            const y = el.getBoundingClientRect().top + window.scrollY - 200; // النزول بالصفحة
+            window.scrollTo({top: y, behavior: 'smooth'});
+        }, phoneInput);
+        await new Promise(r => setTimeout(r, 1000));
+
+        // فتح قائمة الدول (النقر المباشر على الزر لتخطي أي حظر)
+        const dropdownOpened = await page.evaluate((el) => {
+            const container = el.closest('div').parentElement.parentElement;
+            const dropdown = container.querySelector('[role="combobox"], [aria-haspopup="listbox"], button');
+            if (dropdown) { dropdown.click(); return true; }
+            return false;
+        }, phoneInput);
+
+        if (dropdownOpened) {
+            // انتظار القائمة للظهور وكتابة الرمز واختياره
+            await new Promise(r => setTimeout(r, 1500));
+            await page.keyboard.type(`+${countryCode}`);
+            await new Promise(r => setTimeout(r, 1000));
+            await page.keyboard.press('ArrowDown'); // النزول للنتيجة الصحيحة
+            await new Promise(r => setTimeout(r, 200));
+            await page.keyboard.press('Enter');     // تأكيد الاختيار
+            await new Promise(r => setTimeout(r, 1000));
         }
+
+        // 3. تنظيف الخانة وكتابة الرقم الصافي
+        await phoneInput.click();
+        await page.keyboard.down('Control'); await page.keyboard.press('A'); await page.keyboard.up('Control');
+        await page.keyboard.press('Backspace');
+        await phoneInput.type(nationalNumber, { delay: randomDelay() });
         
+        // 4. كتابة الإيميلات
+        await visibleTextInputs[1].type(email, { delay: randomDelay() });
+        await visibleTextInputs[2].type(email, { delay: randomDelay() });
+        
+        // 5. اختيار نوع الجهاز
         const androidRadio = await page.$('input[type="radio"][value="android"]') || (await page.$$('input[type="radio"]'))[0];
-        if (androidRadio) await androidRadio.click();
+        if (androidRadio) await page.evaluate((el) => el.click(), androidRadio);
         
+        // 6. كتابة الرسالة
         await page.waitForSelector('textarea', { timeout: 10000 });
-        await page.type('textarea', customMsg, { delay: randomDelay(20, 50) });
+        const textarea = await page.$('textarea');
+        await page.evaluate((el) => {
+            const y = el.getBoundingClientRect().top + window.scrollY - 200;
+            window.scrollTo({top: y, behavior: 'smooth'});
+        }, textarea);
+        await new Promise(r => setTimeout(r, 500));
+        await textarea.type(customMsg, { delay: randomDelay(20, 50) });
         
-        // الخطوة التالية
+        // 7. النقر على "Next Step"
         let submitButton = await page.$('button[type="submit"]');
         if (!submitButton) {
             const buttons = await page.$$('button');
             submitButton = buttons[buttons.length - 1]; 
         }
-        if (submitButton) await submitButton.click();
+        if (submitButton) await page.evaluate((el) => el.click(), submitButton);
         
-        // انتظار صفحة المقالات والنقر على زر "إرسال سؤال"
+        // 8. انتظار الصفحة التالية ثم النقر على "Send Question"
         await new Promise(r => setTimeout(r, 6000));
         await page.evaluate(() => {
             const buttons = Array.from(document.querySelectorAll('button, div[role="button"]'));
             const sendBtn = buttons.reverse().find(b => 
-                b.innerText.includes('إرسال') || b.innerText.toLowerCase().includes('send')
+                b.innerText.toLowerCase().includes('send') || 
+                b.innerText.toLowerCase().includes('submit') ||
+                b.innerText.includes('إرسال')
             );
             if (sendBtn) sendBtn.click();
         });
 
-        // انتظار شاشة النجاح
+        // 9. انتظار صفحة النجاح
         await new Promise(r => setTimeout(r, 6000));
 
-        // التقاط صورة النجاح وإرسالها
+        // 10. إرسال لقطة الشاشة إليك
         const successScreenshotPath = `success_${Date.now()}.png`;
         await page.screenshot({ path: successScreenshotPath, fullPage: true });
 
