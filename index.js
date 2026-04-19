@@ -46,7 +46,7 @@ async function getBrowser() {
     console.log("🔄 جاري تهيئة محرك المتصفح...");
     try {
         globalBrowser = await puppeteer.launch({
-            headless: true, // يفضل وضعها true في Render
+            headless: true,
             executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null,
             args: [
                 '--no-sandbox', 
@@ -103,7 +103,6 @@ bot.hears('🚀 إرسال طلب دعم جديد', async (ctx) => {
     await ctx.replyWithHTML('<b>🌍 الخطوة 1:</b> اختر الدولة المستهدفة:', countryMenu);
 });
 
-// تم إصلاح خطأ الـ Regex هنا ليتعرف على الأزرار بشكل صحيح
 bot.action(/set_code_(.+)/, async (ctx) => {
     const code = ctx.match[1];
     const state = userState[ctx.from.id];
@@ -128,7 +127,6 @@ bot.on('text', async (ctx) => {
 
     const text = ctx.message.text.trim();
 
-    // تجاهل أزرار الكيبورد الرئيسية داخل مسار المحادثة
     if (['🚀 إرسال طلب دعم جديد', '📊 حالة السيرفر', '❌ إلغاء العملية'].includes(text)) return;
 
     if (state.step === 'get_phone') {
@@ -183,20 +181,14 @@ async function runSupportTask(phone, email, customMsg, ctx) {
         context = await browser.createIncognitoBrowserContext();
         page = await context.newPage();
         
-        // 1. تحديد حجم شاشة كمبيوتر قياسي
         await page.setViewport({ width: 1280, height: 800 });
-
-        // 2. فرض اللغة الإنجليزية لتجنب تغير تصميم الصفحة العشوائي (كالبرتغالية التي ظهرت معك)
-        await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8' });
-
-        // 3. استخدام User-Agent ثابت لجهاز كمبيوتر
+        await page.setExtraHTTPHeaders({ 'Accept-Language': 'ar,en-US,en;q=0.9' });
         const desktopUA = new UserAgent({ deviceCategory: 'desktop' }).toString();
         await page.setUserAgent(desktopUA);
         
         await page.goto('https://www.whatsapp.com/contact/noclient/', { waitUntil: 'domcontentloaded', timeout: 60000 });
         
-        // --- 🎯 التحديث الجديد لحل مشكلة عدم العثور على الحقول ---
-        // نحن الآن نبحث عن "حقول الإدخال المرئية" بالترتيب بدلاً من الاسم البرمجي لتفادي تحديثات واتساب
+        // 1. تعبئة الحقول
         await page.waitForFunction(() => {
             const textInputs = Array.from(document.querySelectorAll('input')).filter(
                 i => (i.type === 'text' || i.type === 'tel' || i.type === 'email') && i.offsetHeight > 0
@@ -215,7 +207,6 @@ async function runSupportTask(phone, email, customMsg, ctx) {
         }
 
         if (visibleTextInputs.length >= 3) {
-            // الحقل الأول هو الهاتف، الثاني الإيميل، الثالث تأكيد الإيميل
             await visibleTextInputs[0].type(phone, { delay: randomDelay() });
             await visibleTextInputs[1].type(email, { delay: randomDelay() });
             await visibleTextInputs[2].type(email, { delay: randomDelay() });
@@ -223,43 +214,66 @@ async function runSupportTask(phone, email, customMsg, ctx) {
             throw new Error("تغير تصميم صفحة واتساب ولم أتمكن من إيجاد حقول النص.");
         }
         
-        // تحديد نوع الجهاز (Android) بشكل ذكي
+        // 2. اختيار أندرويد وكتابة الرسالة
         const androidRadio = await page.$('input[type="radio"][value="android"]') || (await page.$$('input[type="radio"]'))[0];
-        if (androidRadio) {
-            await androidRadio.click();
-        }
+        if (androidRadio) await androidRadio.click();
         
-        // كتابة الرسالة في مربع النص (Textarea) الوحيد
         await page.waitForSelector('textarea', { timeout: 10000 });
         await page.type('textarea', customMsg, { delay: randomDelay(20, 50) });
         
-        // النقر على زر الخطوة التالية بشكل ذكي (البحث عن الزر النهائي)
+        // 3. النقر على زر "الخطوة التالية" في الصفحة الأولى
         let submitButton = await page.$('button[type="submit"]');
         if (!submitButton) {
             const buttons = await page.$$('button');
             submitButton = buttons[buttons.length - 1]; 
         }
-        if (submitButton) {
-            await submitButton.click();
-        }
+        if (submitButton) await submitButton.click();
         
-        // الانتظار قليلاً لتحميل صفحة التأكيد
-        await new Promise(r => setTimeout(r, 5000));
+        // --- 🎯 التحديث المهم هنا ---
+        // 4. الانتظار حتى تفتح صفحة المقالات (الصفحة الثانية)
+        await new Promise(r => setTimeout(r, 6000));
         
-        // النقر على زر الإرسال النهائي في الصفحة التالية (إن وُجد)
-        const finalSubmit = await page.$('button[type="submit"]'); 
-        if (finalSubmit) {
-            await finalSubmit.click();
-            await new Promise(r => setTimeout(r, 3000));
-        }
+        // 5. البحث بذكاء عن زر "إرسال سؤال" والنقر عليه
+        await page.evaluate(() => {
+            const buttons = Array.from(document.querySelectorAll('button, div[role="button"]'));
+            // البحث عن زر يحتوي على نص الإرسال بمختلف اللغات
+            const sendBtn = buttons.find(b => 
+                b.innerText.includes('إرسال') || 
+                b.innerText.toLowerCase().includes('send') || 
+                b.innerText.toLowerCase().includes('enviar')
+            );
+            
+            if (sendBtn) {
+                sendBtn.click();
+            } else if (buttons.length > 0) {
+                // كبديل أخير، النقر على الزر الأخير في الصفحة
+                buttons[buttons.length - 1].click();
+            }
+        });
 
-        await ctx.replyWithHTML(`✅ <b>تم الإرسال بنجاح سيدي!</b>\n\n📱 الرقم: <code>${phone}</code>`);
+        // 6. الانتظار حتى تفتح صفحة النجاح (الصح الأخضر)
+        await new Promise(r => setTimeout(r, 6000));
+
+        // 7. التقاط صورة النجاح وإرسالها للتليجرام
+        const successScreenshotPath = `success_${Date.now()}.png`;
+        await page.screenshot({ path: successScreenshotPath, fullPage: true });
+
+        await ctx.replyWithPhoto(
+            { source: successScreenshotPath }, 
+            { 
+                caption: `✅ <b>تم الإرسال بنجاح سيدي!</b>\n\n📱 الرقم: <code>${phone}</code>\n\n📸 إليك الدليل من داخل سيرفرات واتساب على إتمام العملية.`, 
+                parse_mode: 'HTML' 
+            }
+        );
+
+        // حذف الصورة من السيرفر لتوفير المساحة
+        if (fs.existsSync(successScreenshotPath)) fs.unlinkSync(successScreenshotPath);
+
     } catch (err) {
         console.error("Task Error:", err);
         if (page) {
             const screenshotPath = `error_${Date.now()}.png`;
             try {
-                // التقاط صفحة كاملة لمعرفة أي أخطاء إن وجدت
                 await page.screenshot({ path: screenshotPath, fullPage: true });
                 await ctx.replyWithPhoto({ source: screenshotPath }, { caption: `❌ فشل الإرسال.\nالخطأ: ${err.message}` });
                 if (fs.existsSync(screenshotPath)) fs.unlinkSync(screenshotPath);
@@ -277,7 +291,7 @@ async function runSupportTask(phone, email, customMsg, ctx) {
 
 // تشغيل البوت وتهيئة المتصفح
 getBrowser().then(() => {
-    bot.launch({ dropPendingUpdates: true }); // تمنع البوت من تنفيذ الرسائل المتراكمة أثناء الإطفاء
+    bot.launch({ dropPendingUpdates: true });
     console.log("🤖 بوت التليجرام يعمل الآن.");
 }).catch(err => console.error("❌ فشل تشغيل النظام:", err));
 
